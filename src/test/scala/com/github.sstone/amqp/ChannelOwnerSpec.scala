@@ -1,5 +1,6 @@
 package com.github.sstone.amqp
 
+import akka.routing.RoundRobinRouter
 import org.scalatest.junit.JUnitRunner
 import org.junit.runner.RunWith
 import akka.testkit.TestProbe
@@ -132,6 +133,34 @@ class ChannelOwnerSpec extends ChannelSpec  {
       val latch = waitForConnection(system, actors: _*)
       latch.await(10000, TimeUnit.MILLISECONDS)
       latch.getCount should be(0)
+    }
+  }
+
+  "ChannelOwner should create multiple child actors based on router spec" should {
+    "when router configuration is not used only create one" in {
+      val channelActor = ConnectionOwner.createChildActor(conn, ChannelOwner.props(), name = Some("someChanel"))
+      val latch = waitForConnection(system, channelActor)
+      latch.await(10000, TimeUnit.MILLISECONDS)
+      latch.getCount should be(0)
+      channelActor ! DeclareQueue(QueueParameters("my_queue", passive = false, durable = false, autodelete = true))
+      channelActor ! QueueBind("my_queue", "amq.direct", "my_test_key")
+      channelActor ! Publish("amq.direct", "my_test_key", "yo!".getBytes)
+      receiveN(3, 2 seconds)
+      Thread.sleep(100)
+    }
+    "when router configuration is used create number of actors specified" in {
+      val channelActor = ConnectionOwner.createChildActor(conn, ChannelOwner.props()
+        .withRouter(
+        RoundRobinRouter(nrOfInstances = 10)),
+        name = Some("someChanel"))
+      val latch = waitForConnection(system, channelActor)
+      latch.await(60000, TimeUnit.MILLISECONDS)
+      latch.getCount should be(0)
+      channelActor ! DeclareQueue(QueueParameters("my_queue", passive = false, durable = false, autodelete = true))
+      channelActor ! QueueBind("my_queue", "amq.direct", "my_test_key")
+      channelActor ! Publish("amq.direct", "my_test_key", "yo!".getBytes)
+      receiveN(3, 2 seconds)
+      Thread.sleep(100)
     }
   }
 }

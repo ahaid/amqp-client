@@ -1,16 +1,18 @@
 package com.github.sstone.amqp
 
-import Amqp._
+import java.util.concurrent.ExecutorService
+
 import akka.actor._
 import akka.event.LoggingReceive
 import akka.pattern.ask
+import akka.routing.RouterConfig
 import akka.util.Timeout
-import com.rabbitmq.client.{Connection, ShutdownSignalException, ShutdownListener, ConnectionFactory, Address => RMQAddress}
-import scala.concurrent.{ExecutionContext, Await}
-import concurrent.duration._
-import java.util.concurrent.ExecutorService
+import com.github.sstone.amqp.Amqp._
+import com.rabbitmq.client.{Connection, ConnectionFactory, ShutdownListener, ShutdownSignalException, Address => RMQAddress}
+
+import scala.concurrent.Await
+import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
-import collection.JavaConversions._
 
 object ConnectionOwner {
 
@@ -20,15 +22,15 @@ object ConnectionOwner {
 
   case object Connected extends State
 
-  case class Create(props: Props, name: Option[String] = None)
+  case class Create(props: Props, name: Option[String] = None, fromConfig: Option[RouterConfig] = None)
 
   case object CreateChannel
 
   def props(connFactory: ConnectionFactory, reconnectionDelay: FiniteDuration = 10000 millis,
             executor: Option[ExecutorService] = None, addresses: Option[Array[RMQAddress]] = None): Props = Props(new ConnectionOwner(connFactory, reconnectionDelay, executor, addresses))
 
-  def createChildActor(conn: ActorRef, channelOwner: Props, name: Option[String] = None, timeout: Timeout = 5000.millis): ActorRef = {
-    val future = conn.ask(Create(channelOwner, name))(timeout).mapTo[ActorRef]
+  def createChildActor(conn: ActorRef, channelOwner: Props, name: Option[String] = None, timeout: Timeout = 5000.millis, fromConfig: Option[RouterConfig] = None): ActorRef = {
+    val future = conn.ask(Create(channelOwner, name, fromConfig))(timeout).mapTo[ActorRef]
     Await.result(future, timeout.duration)
   }
 
@@ -77,7 +79,7 @@ class ConnectionOwner(connFactory: ConnectionFactory,
                       executor: Option[ExecutorService] = None,
                       addresses: Option[Array[RMQAddress]] = None) extends Actor with ActorLogging {
 
-  import ConnectionOwner._
+  import com.github.sstone.amqp.ConnectionOwner._
   import context.dispatcher
 
   var connection: Option[Connection] = None
@@ -101,11 +103,13 @@ class ConnectionOwner(connFactory: ConnectionFactory,
    * @param name optional actor name
    * @return a new actor
    */
-  private def createChild(props: Props, name: Option[String]) = {
+  private def createChild(props: Props, name: Option[String], fromConfig: Option[RouterConfig]) = {
     // why isn't there an actorOf(props: Props, name: Option[String] = None) ?
-    name match {
-      case None => context.actorOf(props)
-      case Some(actorName) => context.actorOf(props, actorName)
+    (name, fromConfig) match {
+      case (None, None) => context.actorOf(props)
+      case (None, Some(fromConfig)) => context.actorOf(props.withRouter(fromConfig))
+      case (Some(actorName), None) => context.actorOf(props, actorName)
+      case (Some(actorName), Some(fromConfig)) => context.actorOf(props.withRouter(fromConfig), actorName)
     }
   }
 
@@ -155,8 +159,8 @@ class ConnectionOwner(connFactory: ConnectionFactory,
     /**
      * create a "channel aware" child actor
      */
-    case Create(props, name) => {
-      val child = createChild(props, name)
+    case Create(props, name, fromConfig) => {
+      val child = createChild(props, name, fromConfig)
       log.debug("creating child {} while in disconnected state", child)
       sender ! child
     }
@@ -176,8 +180,8 @@ class ConnectionOwner(connFactory: ConnectionFactory,
       addStatusListener(listener)
       listener ! Connected
     }
-    case Create(props, name) => {
-      sender ! createChild(props, name)
+    case Create(props, name, fromConfig) => {
+      sender ! createChild(props, name, fromConfig)
     }
     case Shutdown(cause) => {
       log.error(cause, "connection lost")
